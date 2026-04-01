@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Sun Thief — II</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    html, body { width:100%; height:100%; overflow:hidden; background:#000; }
+    canvas { display:block; position:fixed; top:0; left:0; cursor:none; }
+    body::after {
+      content:''; position:fixed; inset:0; pointer-events:none; z-index:6;
+      opacity:0.30;
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='250' height='250'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='250' height='250' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size:180px 180px; mix-blend-mode:overlay;
+    }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+let W = canvas.width  = window.innerWidth;
+let H = canvas.height = window.innerHeight;
+
+window.addEventListener('resize', () => {
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  buildAscii();
+});
+
+// ── Assets ────────────────────────────────────────────────────────────────────
+const bgImg = new Image();
+bgImg.src   = 'Your.png';
+bgImg.onload  = () => { buildAscii(); initBalls(); loop(); };
+bgImg.onerror = () => { initBalls(); loop(); };
+
+// ── ASCII renderer ────────────────────────────────────────────────────────────
+// 800 character columns, original photo colours preserved
+const ASCII_CHARS = ' .\'`^",:;Il!i><~+_-?][}{1)(|/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$';
+let asciiCanvas = null;
+
+function buildAscii() {
+  if (!bgImg.complete || bgImg.naturalWidth === 0) return;
+
+  const COLS = 800;
+  const ROWS = Math.round(COLS * (H / W) * 0.46);
+  const CW   = W / COLS;
+  const CH   = H / ROWS;
+  const FS   = Math.max(2, Math.ceil(CW * 1.12));
+
+  // Sample image at grid resolution
+  const samp = document.createElement('canvas');
+  samp.width = COLS; samp.height = ROWS;
+  const sc = samp.getContext('2d');
+  const iw = bgImg.naturalWidth, ih = bgImg.naturalHeight;
+  const scale = Math.max(COLS/iw, ROWS/ih);
+  const dw = iw*scale, dh = ih*scale;
+  const dx = (COLS-dw)/2, dy = (ROWS-dh)/2;
+  // Original colours — no filter
+  sc.drawImage(bgImg, dx, dy, dw, dh);
+  const pix = sc.getImageData(0, 0, COLS, ROWS).data;
+
+  asciiCanvas = document.createElement('canvas');
+  asciiCanvas.width  = W;
+  asciiCanvas.height = H;
+  const ac = asciiCanvas.getContext('2d');
+
+  ac.fillStyle = '#060504';
+  ac.fillRect(0, 0, W, H);
+  ac.font          = `${FS}px monospace`;
+  ac.textBaseline  = 'top';
+
+  for (let row = 0; row < ROWS; row++) {
+    for (let col = 0; col < COLS; col++) {
+      const i  = (row*COLS + col)*4;
+      const r  = pix[i], g = pix[i+1], b = pix[i+2];
+      const lum = 0.299*r + 0.587*g + 0.114*b;
+      const ci  = Math.floor((lum/255)*(ASCII_CHARS.length-1));
+      const ch  = ASCII_CHARS[ci];
+      if (ch === ' ') continue;
+      // Use the actual pixel colour — no tinting
+      ac.fillStyle = `rgb(${r},${g},${b})`;
+      ac.fillText(ch, col*CW, row*CH);
+    }
+  }
+}
+
+// ── Mouse ─────────────────────────────────────────────────────────────────────
+const mouseRaw = { x:-999, y:-999 };
+const mouse    = { x:-999, y:-999, active:false };
+window.addEventListener('mousemove', e => {
+  mouseRaw.x=e.clientX; mouseRaw.y=e.clientY; mouse.active=true;
+  if (!ballsSpawned) triggerSpawn();
+});
+window.addEventListener('touchmove', e => {
+  mouseRaw.x=e.touches[0].clientX; mouseRaw.y=e.touches[0].clientY; mouse.active=true;
+  if (!ballsSpawned) triggerSpawn();
+}, { passive:true });
+function smoothMouse() {
+  mouse.x += (mouseRaw.x - mouse.x)*0.09;
+  mouse.y += (mouseRaw.y - mouse.y)*0.09;
+}
+
+// ── Balls ─────────────────────────────────────────────────────────────────────
+const GLOW = [
+  { core:'rgba(255,232,95,',  mid:'rgba(255,148,22,',  outer:'rgba(195,68,4,'  },
+  { core:'rgba(255,218,78,',  mid:'rgba(238,118,14,',  outer:'rgba(172,48,4,'  },
+  { core:'rgba(255,244,128,', mid:'rgba(255,178,42,',  outer:'rgba(212,92,7,'  },
+];
+
+let balls=[], ballsSpawned=false, nextId=0, lastSpawn=0;
+const MAX_BALLS=62, SPAWN_MS=260;
+
+function srand(s){ let v=s; return ()=>{ v=(v*1664525+1013904223)&0xffffffff; return (v>>>0)/0xffffffff; }; }
+
+class Ball {
+  constructor(id, spawnX, spawnY) {
+    this.id=id;
+    const r=srand(id*43+7);
+    const inSky=r()<0.82;
+    this.homeX = spawnX+(r()-0.5)*W*0.52;
+    this.homeY = inSky ? H*0.03+r()*H*0.44 : H*0.44+r()*H*0.26;
+
+    const big=r()<0.14;
+    const t=r();
+    this.baseR = big
+      ? (0.032+r()*0.048)*Math.min(W,H)
+      : (0.004+Math.pow(t,2.8)*0.026)*Math.min(W,H);
+
+    this.x=this.homeX; this.y=this.homeY;
+    this.vx=0; this.vy=0;
+    this.floatX=(r()-0.5)*0.26;
+    this.floatY=-(0.04+r()*0.10);
+    this.waveAmp=2+r()*6;
+    this.waveFreq=0.00032+r()*0.00048;
+    this.wavePhase=r()*Math.PI*2;
+    this.phase2=r()*Math.PI*2;
+    this.col=GLOW[id%3];
+    this.pPhase=r()*Math.PI*2;
+    this.pSpeed=0.009+r()*0.015;
+    this.alpha=0; this.fadedIn=false;
+    this.fadeStart=performance.now()+r()*280;
+    this.dragging=false; this.dragOffX=0; this.dragOffY=0;
+    this.lastMX=0; this.lastMY=0;
+    this.throwVX=0; this.throwVY=0;
+    this.flying=false; this.returning=false;
+    this.sVX=0; this.sVY=0;
+  }
+
+  update(ts,dt) {
+    if (!this.fadedIn) {
+      this.alpha=Math.max(0,Math.min(1,(ts-this.fadeStart)/1500));
+      if (this.alpha>=1) this.fadedIn=true;
+    }
+    if (this.alpha<=0) return;
+    this.pPhase+=this.pSpeed;
+
+    if (this.dragging) {
+      this.throwVX=(mouse.x-this.dragOffX-this.lastMX)*0.55+this.throwVX*0.45;
+      this.throwVY=(mouse.y-this.dragOffY-this.lastMY)*0.55+this.throwVY*0.45;
+      this.lastMX=mouse.x-this.dragOffX; this.lastMY=mouse.y-this.dragOffY;
+      this.x=mouse.x-this.dragOffX; this.y=mouse.y-this.dragOffY;
+      this.sVX=0; this.sVY=0; return;
+    }
+    if (this.flying) {
+      this.x+=this.vx; this.y+=this.vy;
+      const r=this.baseR;
+      if (this.x<-r*2||this.x>W+r*2||this.y<-r*2||this.y>H+r*2) {
+        this.flying=false; this.returning=true;
+        if (this.x<-r*2) this.x=W+r; else if(this.x>W+r*2) this.x=-r;
+        if (this.y<-r*2) this.y=H+r; else if(this.y>H+r*2) this.y=-r;
+        const dx=this.homeX-this.x,dy=this.homeY-this.y,d=Math.hypot(dx,dy)||1;
+        const sp=3.5+Math.random()*2; this.vx=dx/d*sp; this.vy=dy/d*sp;
+      }
+      return;
+    }
+    if (this.returning) {
+      this.x+=this.vx; this.y+=this.vy;
+      const dx=this.homeX-this.x,dy=this.homeY-this.y,d=Math.hypot(dx,dy);
+      if(d<65){this.vx*=0.88;this.vy*=0.88;}
+      if(d<4){this.x=this.homeX;this.y=this.homeY;this.vx=0;this.vy=0;this.returning=false;}
+      return;
+    }
+    const mdx=this.x-mouse.x,mdy=this.y-mouse.y,md=Math.hypot(mdx,mdy);
+    if (mouse.active&&md<160) {
+      const str=1-md/160;
+      if (md<75){const fd=md||1;this.sVX+=(mdx/fd)*str*2.6;this.sVY+=(mdy/fd)*str*2.6;}
+    }
+    this.sVX*=0.86; this.sVY*=0.86;
+    this.wavePhase+=this.waveFreq*dt; this.phase2+=this.waveFreq*dt*0.55;
+    this.homeX+=this.floatX*(dt/16); this.homeY+=this.floatY*(dt/16);
+    if(this.homeY<-this.baseR*4){this.homeY=H+this.baseR;this.homeX=W*Math.random();}
+    if(this.homeX<-this.baseR*3)this.homeX=W+this.baseR;
+    if(this.homeX>W+this.baseR*3)this.homeX=-this.baseR;
+    this.x=this.homeX+Math.sin(this.wavePhase)*this.waveAmp+this.sVX*7;
+    this.y=this.homeY+Math.cos(this.phase2)*this.waveAmp*0.6+this.sVY*7;
+  }
+
+  release() {
+    this.dragging=false;this.flying=true;this.returning=false;
+    const sp=Math.hypot(this.throwVX,this.throwVY),mn=8;
+    if(sp<mn){const a=Math.atan2(this.throwVY,this.throwVX);this.vx=Math.cos(a)*mn;this.vy=Math.sin(a)*mn;}
+    else{this.vx=this.throwVX*1.4;this.vy=this.throwVY*1.4;}
+  }
+
+  isHit(mx,my){return Math.hypot(mx-this.x,my-this.y)<this.baseR*1.15;}
+
+  draw() {
+    if(this.alpha<=0)return;
+    const r=this.baseR,pulse=0.5+0.5*Math.sin(this.pPhase);
+    const near=mouse.active?Math.max(0,1-Math.hypot(this.x-mouse.x,this.y-mouse.y)/160):0;
+    const glow=pulse+near*0.35,a=this.alpha,col=this.col;
+    ctx.save(); ctx.globalAlpha=a;
+
+    const halo=ctx.createRadialGradient(this.x,this.y,r*0.2,this.x,this.y,r*3.8);
+    halo.addColorStop(0,col.outer+(0.16*glow)+')');
+    halo.addColorStop(0.4,col.outer+(0.06*glow)+')');
+    halo.addColorStop(1,col.outer+'0)');
+    ctx.beginPath();ctx.arc(this.x,this.y,r*3.8,0,Math.PI*2);
+    ctx.fillStyle=halo;ctx.fill();
+
+    const mid=ctx.createRadialGradient(this.x,this.y,0,this.x,this.y,r*1.8);
+    mid.addColorStop(0,col.mid+(0.90*glow)+')');
+    mid.addColorStop(0.5,col.mid+(0.40*glow)+')');
+    mid.addColorStop(1,col.mid+'0)');
+    ctx.beginPath();ctx.arc(this.x,this.y,r*1.8,0,Math.PI*2);
+    ctx.fillStyle=mid;ctx.fill();
+
+    const core=ctx.createRadialGradient(this.x,this.y,0,this.x,this.y,r*0.65);
+    core.addColorStop(0,col.core+Math.min(0.94,0.80+near*0.14)+')');
+    core.addColorStop(0.5,col.mid+(0.80*glow)+')');
+    core.addColorStop(1,col.mid+'0)');
+    ctx.beginPath();ctx.arc(this.x,this.y,r*0.65,0,Math.PI*2);
+    ctx.fillStyle=core;ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+function initBalls(){
+  for(let i=0;i<3;i++){
+    const b=new Ball(nextId++,W*(0.18+i*0.32),H*0.10);
+    b.fadeStart=performance.now()+99999; balls.push(b);
+  }
+}
+function triggerSpawn(){
+  if(ballsSpawned)return; ballsSpawned=true;
+  const ts=performance.now();
+  balls.forEach((b,i)=>{b.fadeStart=ts+i*420;}); lastSpawn=ts;
+}
+function maybeSpawn(ts){
+  if(!ballsSpawned||balls.length>=MAX_BALLS)return;
+  if(ts-lastSpawn<SPAWN_MS)return; lastSpawn=ts;
+  const p=balls[Math.floor(Math.random()*balls.length)];
+  const b=new Ball(nextId++,p.homeX,p.homeY);
+  b.fadeStart=ts+Math.random()*300; balls.push(b);
+}
+
+// ── Realistic figure silhouettes ──────────────────────────────────────────────
+// Based on the uploaded photo: hoodie, jeans, slightly hunched, three-quarter view
+function drawFigures() {
+  drawFigureLeft();
+  drawFigureRight();
+}
+
+function drawFigureLeft() {
+  // Left figure: reaching up toward a sunball
+  // Anchor at bottom-center of figure
+  const bx = W*0.175;
+  const by = H*0.97;
+  const s  = H*0.32; // height scale
+
+  ctx.save();
+  ctx.fillStyle   = 'rgba(6,4,2,0.92)';
+  ctx.strokeStyle = 'rgba(6,4,2,0.92)';
+  ctx.lineJoin='round'; ctx.lineCap='round';
+
+  // --- Legs ---
+  // Left leg (slightly forward)
+  ctx.beginPath();
+  ctx.moveTo(bx-s*0.04, by-s*0.48);
+  ctx.bezierCurveTo(bx-s*0.08,by-s*0.30, bx-s*0.11,by-s*0.15, bx-s*0.09,by);
+  ctx.bezierCurveTo(bx-s*0.04,by, bx+s*0.01,by, bx+s*0.02,by);
+  ctx.bezierCurveTo(bx+s*0.01,by-s*0.15, bx-s*0.01,by-s*0.30, bx+s*0.02,by-s*0.48);
+  ctx.closePath(); ctx.fill();
+
+  // Right leg (slightly back, slight bend)
+  ctx.beginPath();
+  ctx.moveTo(bx+s*0.04, by-s*0.48);
+  ctx.bezierCurveTo(bx+s*0.07,by-s*0.28, bx+s*0.12,by-s*0.15, bx+s*0.14,by);
+  ctx.bezierCurveTo(bx+s*0.19,by, bx+s*0.22,by, bx+s*0.20,by);
+  ctx.bezierCurveTo(bx+s*0.17,by-s*0.14, bx+s*0.13,by-s*0.28, bx+s*0.10,by-s*0.48);
+  ctx.closePath(); ctx.fill();
+
+  // --- Torso (hoodie — slightly boxy) ---
+  ctx.beginPath();
+  ctx.moveTo(bx-s*0.13, by-s*0.50); // left hip
+  ctx.bezierCurveTo(bx-s*0.15,by-s*0.62, bx-s*0.17,by-s*0.72, bx-s*0.15,by-s*0.80); // left side up
+  ctx.lineTo(bx-s*0.08, by-s*0.88); // left shoulder
+  ctx.lineTo(bx+s*0.10, by-s*0.88); // right shoulder
+  ctx.lineTo(bx+s*0.18, by-s*0.80); // right shoulder outer
+  ctx.bezierCurveTo(bx+s*0.19,by-s*0.72, bx+s*0.18,by-s*0.62, bx+s*0.15,by-s*0.50); // right side down
+  ctx.closePath(); ctx.fill();
+
+  // --- Hoodie hood bump on back ---
+  ctx.beginPath();
+  ctx.ellipse(bx-s*0.02, by-s*0.90, s*0.09, s*0.06, -0.2, 0, Math.PI*2);
+  ctx.fill();
+
+  // --- Head ---
+  ctx.beginPath();
+  ctx.ellipse(bx+s*0.02, by-s*1.00, s*0.085, s*0.095, 0.1, 0, Math.PI*2);
+  ctx.fill();
+
+  // --- Right arm hanging ---
+  ctx.lineWidth=s*0.075;
+  ctx.beginPath();
+  ctx.moveTo(bx+s*0.16, by-s*0.85);
+  ctx.bezierCurveTo(bx+s*0.22,by-s*0.72, bx+s*0.24,by-s*0.60, bx+s*0.22,by-s*0.50);
+  ctx.stroke();
+  // hand
+  ctx.beginPath();
+  ctx.ellipse(bx+s*0.21,by-s*0.47,s*0.04,s*0.05,0.3,0,Math.PI*2);
+  ctx.fill();
+
+  // --- Left arm reaching up toward sky (toward sunballs) ---
+  ctx.lineWidth=s*0.08;
+  ctx.beginPath();
+  ctx.moveTo(bx-s*0.13, by-s*0.83);
+  // elbow sweeps outward then up
+  ctx.bezierCurveTo(
+    bx-s*0.28, by-s*0.78,
+    bx-s*0.22, by-s*0.60,
+    bx+s*0.05, by-s*1.22  // hand high up
+  );
+  ctx.stroke();
+  // hand / fingers spread slightly
+  ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.ellipse(bx+s*0.07,by-s*1.25,s*0.055,s*0.05,0.5,0,Math.PI*2);
+  ctx.fill();
+  // finger lines
+  ctx.lineWidth=s*0.018;
+  ctx.strokeStyle='rgba(6,4,2,0.85)';
+  for(let f=0;f<3;f++){
+    const fa=-0.4+f*0.4;
+    ctx.beginPath();
+    ctx.moveTo(bx+s*0.07+Math.cos(fa+1.5)*s*0.04, by-s*1.25+Math.sin(fa+1.5)*s*0.04);
+    ctx.lineTo(bx+s*0.07+Math.cos(fa+1.5)*s*0.09, by-s*1.25+Math.sin(fa+1.5)*s*0.09);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawFigureRight() {
+  // Right figure: standing, looking up, slight lean back
+  const bx = W*0.58;
+  const by = H*0.97;
+  const s  = H*0.28;
+
+  ctx.save();
+  ctx.fillStyle   = 'rgba(6,4,2,0.90)';
+  ctx.strokeStyle = 'rgba(6,4,2,0.90)';
+  ctx.lineJoin='round'; ctx.lineCap='round';
+
+  // --- Legs ---
+  ctx.beginPath();
+  ctx.moveTo(bx-s*0.03,by-s*0.48);
+  ctx.bezierCurveTo(bx-s*0.06,by-s*0.28,bx-s*0.08,by-s*0.14,bx-s*0.07,by);
+  ctx.bezierCurveTo(bx-s*0.02,by,bx+s*0.03,by,bx+s*0.03,by);
+  ctx.bezierCurveTo(bx+s*0.02,by-s*0.14,bx+s*0.01,by-s*0.28,bx+s*0.03,by-s*0.48);
+  ctx.closePath(); ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(bx+s*0.05,by-s*0.48);
+  ctx.bezierCurveTo(bx+s*0.08,by-s*0.28,bx+s*0.10,by-s*0.14,bx+s*0.12,by);
+  ctx.bezierCurveTo(bx+s*0.17,by,bx+s*0.20,by,bx+s*0.18,by);
+  ctx.bezierCurveTo(bx+s*0.15,by-s*0.14,bx+s*0.12,by-s*0.28,bx+s*0.09,by-s*0.48);
+  ctx.closePath(); ctx.fill();
+
+  // --- Torso ---
+  ctx.beginPath();
+  ctx.moveTo(bx-s*0.11,by-s*0.50);
+  ctx.bezierCurveTo(bx-s*0.13,by-s*0.65,bx-s*0.14,by-s*0.74,bx-s*0.12,by-s*0.82);
+  ctx.lineTo(bx-s*0.06,by-s*0.88);
+  ctx.lineTo(bx+s*0.08,by-s*0.88);
+  ctx.lineTo(bx+s*0.15,by-s*0.82);
+  ctx.bezierCurveTo(bx+s*0.16,by-s*0.74,bx+s*0.15,by-s*0.65,bx+s*0.13,by-s*0.50);
+  ctx.closePath(); ctx.fill();
+
+  // --- Head (tilted up slightly) ---
+  ctx.beginPath();
+  ctx.ellipse(bx+s*0.01,by-s*0.98,s*0.075,s*0.088,-0.15,0,Math.PI*2);
+  ctx.fill();
+
+  // --- Both arms slightly raised, looking up ---
+  ctx.lineWidth=s*0.07;
+  // left arm
+  ctx.beginPath();
+  ctx.moveTo(bx-s*0.11,by-s*0.84);
+  ctx.bezierCurveTo(bx-s*0.18,by-s*0.72,bx-s*0.20,by-s*0.60,bx-s*0.17,by-s*0.50);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(bx-s*0.16,by-s*0.47,s*0.036,s*0.045,0.2,0,Math.PI*2);
+  ctx.fill();
+
+  // right arm slightly raised
+  ctx.beginPath();
+  ctx.moveTo(bx+s*0.14,by-s*0.84);
+  ctx.bezierCurveTo(bx+s*0.20,by-s*0.76,bx+s*0.22,by-s*0.65,bx+s*0.19,by-s*0.54);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(bx+s*0.18,by-s*0.51,s*0.036,s*0.045,-0.2,0,Math.PI*2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// ── Drag ──────────────────────────────────────────────────────────────────────
+let dragged=null;
+window.addEventListener('mousedown',e=>{
+  for(let i=balls.length-1;i>=0;i--){
+    const b=balls[i];
+    if(b.fadedIn&&b.isHit(e.clientX,e.clientY)){
+      dragged=b;b.dragging=true;b.flying=false;b.returning=false;
+      b.dragOffX=e.clientX-b.x;b.dragOffY=e.clientY-b.y;
+      b.lastMX=b.x;b.lastMY=b.y;b.throwVX=0;b.throwVY=0;break;
+    }
+  }
+});
+window.addEventListener('mouseup',()=>{if(dragged){dragged.release();dragged=null;}});
+window.addEventListener('touchstart',e=>{
+  const t=e.touches[0];
+  for(let i=balls.length-1;i>=0;i--){
+    const b=balls[i];
+    if(b.fadedIn&&b.isHit(t.clientX,t.clientY)){
+      dragged=b;b.dragging=true;b.flying=false;b.returning=false;
+      b.dragOffX=t.clientX-b.x;b.dragOffY=t.clientY-b.y;
+      b.lastMX=b.x;b.lastMY=b.y;b.throwVX=0;b.throwVY=0;break;
+    }
+  }
+},{passive:true});
+window.addEventListener('touchend',()=>{if(dragged){dragged.release();dragged=null;}});
+
+// ── Cursor ────────────────────────────────────────────────────────────────────
+function drawCursor(){
+  if(!mouse.active)return;
+  const hov=balls.some(b=>b.fadedIn&&b.isHit(mouse.x,mouse.y));
+  const arm=hov?11:6,gap=3;
+  const col=hov?'rgba(255,210,55,0.95)':'rgba(255,190,75,0.40)';
+  ctx.save();ctx.strokeStyle=col;ctx.lineWidth=1;ctx.lineCap='butt';
+  [[mouse.x-arm,mouse.y,mouse.x-gap,mouse.y],[mouse.x+gap,mouse.y,mouse.x+arm,mouse.y],
+   [mouse.x,mouse.y-arm,mouse.x,mouse.y-gap],[mouse.x,mouse.y+gap,mouse.x,mouse.y+arm]]
+  .forEach(([x1,y1,x2,y2])=>{ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();});
+  const g=ctx.createRadialGradient(mouse.x,mouse.y,0,mouse.x,mouse.y,4);
+  g.addColorStop(0,'rgba(255,215,75,0.85)');g.addColorStop(1,'rgba(255,155,18,0)');
+  ctx.beginPath();ctx.arc(mouse.x,mouse.y,4,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();
+  ctx.restore();
+}
+
+// ── Stars ─────────────────────────────────────────────────────────────────────
+const STARS=Array.from({length:65},()=>({
+  x:Math.random(),y:Math.random()*0.52,
+  r:0.3+Math.random()*0.85,
+  a:0.12+Math.random()*0.40,
+  ph:Math.random()*Math.PI*2,
+  sp:0.0007+Math.random()*0.0013,
+}));
+function drawStars(){
+  ctx.save();
+  STARS.forEach(s=>{
+    s.ph+=s.sp*16;
+    const a=s.a*(0.5+0.5*Math.sin(s.ph));
+    ctx.beginPath();ctx.arc(s.x*W,s.y*H,s.r,0,Math.PI*2);
+    ctx.fillStyle=`rgba(220,212,192,${a})`;ctx.fill();
+  });
+  ctx.restore();
+}
+
+// ── Loop ──────────────────────────────────────────────────────────────────────
+let lastTime=0;
+function loop(ts=0){
+  const dt=Math.min(ts-lastTime,50); lastTime=ts;
+  ctx.clearRect(0,0,W,H);
+  smoothMouse();
+  if(asciiCanvas) ctx.drawImage(asciiCanvas,0,0);
+  else{ctx.fillStyle='#060504';ctx.fillRect(0,0,W,H);}
+  drawStars();
+  maybeSpawn(ts);
+  balls.sort((a,b)=>b.baseR-a.baseR);
+  balls.forEach(b=>b.update(ts,dt));
+  balls.forEach(b=>b.draw());
+  drawCursor();
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
